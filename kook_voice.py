@@ -19,6 +19,7 @@ from kook_api import KookAPI
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("aioice").setLevel(logging.DEBUG)
+logging.getLogger("aiortc").setLevel(logging.DEBUG)
 OPUS_SDP = (
     "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n"
     "m=audio 9 UDP/TLS/RTP/SAVPF 100\r\nc=IN IP4 0.0.0.0\r\n"
@@ -382,9 +383,9 @@ class VoiceClient:
                 })
 
                 try:
-                    await asyncio.wait_for(conn_async.wait(), timeout=8)
+                    await asyncio.wait_for(conn_async.wait(), timeout=15)
                 except asyncio.TimeoutError:
-                    raise RuntimeError("DTLS timeout (8s)")
+                    raise RuntimeError("DTLS timeout (15s)")
                 if pc.connectionState != "connected":
                     print(f"[Voice] ICE candidates: {[c for c in pc.iceConnection._candidates if c] if hasattr(pc, 'iceConnection') and hasattr(pc.iceConnection, '_candidates') else 'n/a'}", flush=True)
                     raise RuntimeError(f"DTLS {pc.connectionState}")
