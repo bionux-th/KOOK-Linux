@@ -125,9 +125,9 @@ class VoiceClient:
                 if data.get("id") == msg_id:
                     break
         if not data.get("ok", False):
-            raise RuntimeError(
-                f"Signal error [{method}]: {data.get('errorReason', data)}"
-            )
+            err = data.get("errorReason", data)
+            print(f"[Voice] Signal error [{method}]: {err}", flush=True)
+            raise RuntimeError(f"Signal error [{method}]: {err}")
         return data
 
     def _signaling(self):
@@ -173,6 +173,7 @@ class VoiceClient:
 
         connected_ev = threading.Event()
         error_ev = threading.Event()
+        error_msg = []
         setup_ok = threading.Event()
 
         def _run():
@@ -301,7 +302,10 @@ class VoiceClient:
             try:
                 loop.run_until_complete(_setup())
             except Exception as e:
-                logger.debug("webrtc error: %s", e)
+                msg = f"{type(e).__name__}: {e}"
+                logger.debug("webrtc error: %s", msg)
+                print(f"[Voice] WebRTC error: {msg}", flush=True)
+                error_msg.append(msg)
                 error_ev.set()
             finally:
                 if self._pc is not None:
@@ -318,18 +322,18 @@ class VoiceClient:
             if connected_ev.is_set():
                 break
             if error_ev.is_set():
-                raise RuntimeError("WebRTC error before connected")
+                raise RuntimeError(f"WebRTC error before connected: {error_msg[0] if error_msg else 'unknown'}")
             time.sleep(0.25)
         else:
             if error_ev.is_set():
-                raise RuntimeError("WebRTC error before connected")
+                raise RuntimeError(f"WebRTC error before connected: {error_msg[0] if error_msg else 'unknown'}")
             raise RuntimeError("WebRTC connection timeout")
 
         for _ in range(40):
             if setup_ok.is_set():
                 break
             if error_ev.is_set():
-                raise RuntimeError("WebRTC error after connected")
+                raise RuntimeError(f"WebRTC error after connected: {error_msg[0] if error_msg else 'unknown'}")
             time.sleep(0.25)
         else:
             raise RuntimeError("WebRTC setup timeout")
