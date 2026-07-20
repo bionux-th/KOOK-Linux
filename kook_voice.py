@@ -75,7 +75,11 @@ class _WsReader:
         while self._running:
             try:
                 raw = self._ws.recv()
+                if not raw:
+                    continue
                 data = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+            except websocket.WebSocketTimeoutException:
+                continue
             except Exception:
                 break
             msg_id = data.get("id")
@@ -99,8 +103,11 @@ class _WsReader:
         msg["id"] = msg_id
         ev = threading.Event()
         with self._lock:
+            try:
+                self._ws.send(json.dumps(msg))
+            except Exception as e:
+                raise RuntimeError(f"Send failed [{method}]: {e}")
             self._pending[msg_id] = ev
-            self._ws.send(json.dumps(msg))
         ev.wait(timeout)
         with self._lock:
             self._pending.pop(msg_id, None)
@@ -416,12 +423,16 @@ class VoiceClient:
                 error_msg.append(msg)
                 error_ev.set()
             finally:
+                for t in asyncio.all_tasks(loop):
+                    t.cancel()
                 if self._pc is not None:
                     try:
                         loop.run_until_complete(self._pc.close())
                     except Exception:
                         pass
                     self._pc = None
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
