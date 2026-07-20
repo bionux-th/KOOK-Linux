@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import random
 import ssl
 import subprocess
@@ -17,9 +16,6 @@ from aiortc.rtcconfiguration import RTCIceServer
 from kook_api import KookAPI
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.WARNING)
-logging.getLogger("aioice").setLevel(logging.DEBUG)
-logging.getLogger("aiortc").setLevel(logging.DEBUG)
 OPUS_SDP = (
     "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n"
     "m=audio 9 UDP/TLS/RTP/SAVPF 100\r\nc=IN IP4 0.0.0.0\r\n"
@@ -49,13 +45,15 @@ class _AudioTrack(MediaStreamTrack):
             data = await asyncio.wait_for(self._queue.get(), timeout=0.1)
         except asyncio.TimeoutError:
             frame = AudioFrame(format="s16", layout="stereo", samples=960)
-            frame.planes[0] = b'\x00' * (960 * 2 * 2)
+            for i, p in enumerate(frame.planes):
+                p.update(b'\x00' * p.buffer_size if i == 0 else b'\x00')
             frame.sample_rate = 48000
             return frame
         if not data:
             raise asyncio.CancelledError
         frame = AudioFrame(format="s16", layout="stereo", samples=960)
-        frame.planes[0] = data
+        for i, p in enumerate(frame.planes):
+            p.update(data if i == 0 else b'\x00')
         frame.sample_rate = 48000
         return frame
 
@@ -394,7 +392,6 @@ class VoiceClient:
                 except asyncio.TimeoutError:
                     raise RuntimeError("DTLS timeout (15s)")
                 if pc.connectionState != "connected":
-                    print(f"[Voice] ICE candidates: {[c for c in pc.iceConnection._candidates if c] if hasattr(pc, 'iceConnection') and hasattr(pc.iceConnection, '_candidates') else 'n/a'}", flush=True)
                     raise RuntimeError(f"DTLS {pc.connectionState}")
                 connected_ev.set()
 
