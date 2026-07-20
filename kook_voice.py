@@ -190,14 +190,16 @@ class VoiceClient:
         self._reader.set_notify_cb(self._on_notification)
 
     def _on_notification(self, data):
-        method = data.get("method") or data.get("event", "")
+        method = data.get("method") or data.get("event", "") or data.get("type", "")
+        print(f"[Voice] NOTIFY: method={method} data={json.dumps(data)[:200]}", flush=True)
         if method in ("producerAdded", "newPeer"):
-            print(f"[Voice] notification: {method}", flush=True)
             threading.Thread(target=self._handle_producer, args=(data,), daemon=True).start()
 
     def _handle_producer(self, data):
         peer_id = data.get("data", {}).get("peerId", "") or data.get("peerId", "")
+        print(f"[Voice] handle_producer peer_id={peer_id} self._peer_id={self._peer_id}", flush=True)
         if peer_id and peer_id == self._peer_id:
+            print("[Voice] skip own producer", flush=True)
             return
         producer_id = data.get("data", {}).get("producerId", "") or data.get("producerId", "") or data.get("consumerId", "")
         kind = data.get("data", {}).get("kind", "audio")
@@ -234,11 +236,13 @@ class VoiceClient:
         self._peer_id = join_resp.get("data", {}).get("peerId", "")
         self._existing_producers = []
         peers = join_resp.get("data", {}).get("peers", [])
+        print(f"[Voice] join peer_id={self._peer_id} peers={json.dumps(peers)[:200]}", flush=True)
         if isinstance(peers, list):
             for p in peers:
                 for prod in (p.get("producers") or []):
                     pid = prod.get("producerId") or prod.get("id")
                     if pid and prod.get("kind") == "audio":
+                        print(f"[Voice] existing producer: {pid}", flush=True)
                         self._existing_producers.append(pid)
         tr = self._ws_call({"request": True, "id": 0,
                             "method": "createWebRtcTransport",
