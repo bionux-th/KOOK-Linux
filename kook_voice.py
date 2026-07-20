@@ -24,7 +24,8 @@ OPUS_SDP = (
     "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n"
     "m=audio 9 UDP/TLS/RTP/SAVPF 100\r\nc=IN IP4 0.0.0.0\r\n"
     "a=ice-ufrag:{ufrag}\r\na=ice-pwd:{pwd}\r\n"
-    "a=fingerprint:{algo} {fp}\r\na=setup:actpass\r\na=mid:0\r\n"
+    "{fingerprints}"
+    "a=setup:actpass\r\na=mid:0\r\n"
     "a=candidate:1 1 UDP 1 {ip} {port} typ host\r\n"
     "a=rtpmap:100 opus/48000/2\r\na=rtcp-mux\r\na=sendrecv\r\n"
 )
@@ -151,10 +152,10 @@ class VoiceClient:
                     self._ws.close()
                 print(f"[Voice] Connecting (attempt {attempt+1})...", flush=True)
                 self._connect_ws(channel_id)
-                transport_id, ice_p, cand, fp = self._signaling()
+                transport_id, ice_p, cand, fp, all_fps = self._signaling()
                 self._cand = cand
                 self._running = True
-                self._try_webrtc(transport_id, ice_p, cand, fp)
+                self._try_webrtc(transport_id, ice_p, cand, fp, all_fps)
                 print(f"[Voice] Joined channel {channel_id}", flush=True)
                 threading.Thread(target=self._ping_loop, daemon=True).start()
                 return {"audio_ssrc": "1357", "audio_pt": "100", "bitrate": 128,
@@ -246,11 +247,13 @@ class VoiceClient:
                             "data": {"forceTcp": False, "producing": True,
                                      "consuming": True}})
         self._transport_id = tr["data"]["id"]
+        fps = tr["data"]["dtlsParameters"]["fingerprints"]
         return (
             tr["data"]["id"],
             tr["data"]["iceParameters"],
             tr["data"]["iceCandidates"][0],
-            tr["data"]["dtlsParameters"]["fingerprints"][0],
+            fps[0],
+            fps,
         )
 
     def _cleanup(self):
@@ -265,12 +268,16 @@ class VoiceClient:
         self._track = None
         self._transport_id = None
 
-    def _try_webrtc(self, transport_id, ice_p, cand, fp):
+    def _try_webrtc(self, transport_id, ice_p, cand, fp, all_fps=None):
+        fp_lines = ""
+        for f in (all_fps or [fp]):
+            algo = f.get("algorithm", "sha-256")
+            val = f.get("value", "")
+            fp_lines += f"a=fingerprint:{algo} {val}\r\n"
         sdp_offer = OPUS_SDP.format(
             ufrag=ice_p["usernameFragment"],
             pwd=ice_p["password"],
-            algo=fp["algorithm"],
-            fp=fp["value"],
+            fingerprints=fp_lines,
             ip=cand["ip"],
             port=cand["port"],
         )
