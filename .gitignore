@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+*.flow
+*.db
+屏幕截图*.png
