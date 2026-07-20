@@ -149,9 +149,9 @@ class VoiceClient:
                 self._connect_ws(channel_id)
                 transport_id, ice_p, cand, fp = self._signaling()
                 self._cand = cand
+                self._running = True
                 self._try_webrtc(transport_id, ice_p, cand, fp)
                 print(f"[Voice] Joined channel {channel_id}", flush=True)
-                self._running = True
                 threading.Thread(target=self._ping_loop, daemon=True).start()
                 return {"audio_ssrc": "1357", "audio_pt": "100", "bitrate": 128,
                         "ip": cand["ip"], "port": cand["port"]}
@@ -435,12 +435,9 @@ class VoiceClient:
                     self._pc = None
                 for t in asyncio.all_tasks(loop):
                     t.cancel()
-                    try:
-                        loop.run_until_complete(t)
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                loop.run_until_complete(loop.shutdown_asyncgens())
-                loop.close()
+                if not loop.is_closed():
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                    loop.close()
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
