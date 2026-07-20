@@ -39,7 +39,13 @@ class _AudioTrack(MediaStreamTrack):
         self._queue.put_nowait(b"")
 
     async def recv(self):
-        data = await self._queue.get()
+        try:
+            data = await asyncio.wait_for(self._queue.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            frame = AudioFrame(format="s16", layout="stereo", samples=960)
+            frame.planes[0] = b'\x00' * (960 * 2 * 2)
+            frame.sample_rate = 48000
+            return frame
         if not data:
             raise asyncio.CancelledError
         frame = AudioFrame(format="s16", layout="stereo", samples=960)
@@ -48,17 +54,80 @@ class _AudioTrack(MediaStreamTrack):
         return frame
 
 
+class _WsReader:
+    def __init__(self, ws):
+        self._ws = ws
+        self._pending = {}  # id -> Event
+        self._results = {}  # id -> dict
+        self._lock = threading.Lock()
+        self._notify_cb = None
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def set_notify_cb(self, cb):
+        self._notify_cb = cb
+
+    def stop(self):
+        self._running = False
+
+    def _run(self):
+        while self._running:
+            try:
+                raw = self._ws.recv()
+                data = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+            except Exception:
+                break
+            msg_id = data.get("id")
+            if msg_id is not None:
+                with self._lock:
+                    ev = self._pending.get(msg_id)
+                    if ev:
+                        self._results[msg_id] = data
+                        ev.set()
+                        continue
+            cb = self._notify_cb
+            if cb:
+                try:
+                    cb(data)
+                except Exception:
+                    pass
+
+    def call(self, msg: dict, timeout: float = 10) -> dict:
+        method = msg.get("method", "?")
+        msg_id = random.randint(1000000, 9999999)
+        msg["id"] = msg_id
+        ev = threading.Event()
+        with self._lock:
+            self._pending[msg_id] = ev
+            self._ws.send(json.dumps(msg))
+        ev.wait(timeout)
+        with self._lock:
+            self._pending.pop(msg_id, None)
+            result = self._results.pop(msg_id, None)
+        if result is None:
+            raise RuntimeError(f"Signal timeout [{method}]")
+        if not result.get("ok", False):
+            err = result.get("errorReason", result)
+            print(f"[Voice] Signal error [{method}]: {err}", flush=True)
+            raise RuntimeError(f"Signal error [{method}]: {err}")
+        return result
+
+
 class VoiceClient:
     def __init__(self, api: KookAPI):
         self.api = api
         self.channel_id: Optional[str] = None
         self._ws = None
-        self._ws_lock = threading.Lock()
+        self._reader: Optional[_WsReader] = None
         self._running = False
         self._pc: Optional[RTCPeerConnection] = None
+        self._loop = None
         self._track: Optional[_AudioTrack] = None
         self._ffmpeg_proc: Optional[subprocess.Popen] = None
         self._cand: Optional[dict] = None
+        self._transport_id = None
+        self._existing_producers: list = []
 
     def join(self, channel_id: str, password: Optional[str] = None) -> dict:
         self.channel_id = channel_id
@@ -106,39 +175,65 @@ class VoiceClient:
             gw_url, timeout=10, sslopt={"cert_reqs": ssl.CERT_NONE}
         )
         self._ws.settimeout(5)
+        self._reader = _WsReader(self._ws)
+        self._reader.set_notify_cb(self._on_notification)
 
-    def _ws_send(self, msg: dict):
-        self._ws.send(json.dumps(msg))
+    def _on_notification(self, data):
+        method = data.get("method") or data.get("event", "")
+        if method in ("producerAdded", "newPeer"):
+            print(f"[Voice] notification: {method}", flush=True)
+            threading.Thread(target=self._handle_producer, args=(data,), daemon=True).start()
 
-    def _ws_recv(self) -> dict:
-        resp = self._ws.recv()
-        return json.loads(resp) if isinstance(resp, str) else json.loads(resp.decode())
+    def _handle_producer(self, data):
+        peer_id = data.get("data", {}).get("peerId", "") or data.get("peerId", "")
+        if peer_id and peer_id == self._peer_id:
+            return
+        producer_id = data.get("data", {}).get("producerId", "") or data.get("producerId", "") or data.get("consumerId", "")
+        kind = data.get("data", {}).get("kind", "audio")
+        if not producer_id or not self._transport_id:
+            print(f"[Voice] consume skipped: no producerId or transport", flush=True)
+            return
+        try:
+            self._reader.call({
+                "request": True, "id": 0, "method": "consume",
+                "data": {
+                    "transportId": self._transport_id,
+                    "producerId": producer_id,
+                    "kind": kind,
+                    "rtpCapabilities": {"codecs": [{
+                        "channels": 2, "clockRate": 48000,
+                        "mimeType": "audio/opus",
+                        "parameters": {"sprop-stereo": 1},
+                        "payloadType": 100,
+                    }]},
+                },
+            })
+            print(f"[Voice] consume {producer_id} ok", flush=True)
+        except Exception as e:
+            print(f"[Voice] consume {producer_id} failed: {e}", flush=True)
 
     def _ws_call(self, msg: dict) -> dict:
-        method = msg.get("method", "?")
-        msg_id = random.randint(1000000, 9999999)
-        msg["id"] = msg_id
-        with self._ws_lock:
-            self._ws_send(msg)
-            while True:
-                data = self._ws_recv()
-                if data.get("id") == msg_id:
-                    break
-        if not data.get("ok", False):
-            err = data.get("errorReason", data)
-            print(f"[Voice] Signal error [{method}]: {err}", flush=True)
-            raise RuntimeError(f"Signal error [{method}]: {err}")
-        return data
+        return self._reader.call(msg)
 
     def _signaling(self):
         self._ws_call({"request": True, "id": 0,
                        "method": "getRouterRtpCapabilities", "data": {}})
-        self._ws_call({"data": {"displayName": ""}, "id": 0,
-                       "method": "join", "request": True})
+        join_resp = self._ws_call({"data": {"displayName": ""}, "id": 0,
+                                   "method": "join", "request": True})
+        self._peer_id = join_resp.get("data", {}).get("peerId", "")
+        self._existing_producers = []
+        peers = join_resp.get("data", {}).get("peers", [])
+        if isinstance(peers, list):
+            for p in peers:
+                for prod in (p.get("producers") or []):
+                    pid = prod.get("producerId") or prod.get("id")
+                    if pid and prod.get("kind") == "audio":
+                        self._existing_producers.append(pid)
         tr = self._ws_call({"request": True, "id": 0,
                             "method": "createWebRtcTransport",
                             "data": {"forceTcp": False, "producing": True,
                                      "consuming": True}})
+        self._transport_id = tr["data"]["id"]
         return (
             tr["data"]["id"],
             tr["data"]["iceParameters"],
@@ -156,6 +251,7 @@ class VoiceClient:
                 fut.result(timeout=5)
             self._pc = None
         self._track = None
+        self._transport_id = None
 
     def _try_webrtc(self, transport_id, ice_p, cand, fp):
         sdp_offer = OPUS_SDP.format(
@@ -268,13 +364,6 @@ class VoiceClient:
                     raise RuntimeError(f"DTLS {pc.connectionState}")
                 connected_ev.set()
 
-                silence = b'\x00' * (960 * 2 * 2)
-                async def _silence():
-                    while self._running:
-                        track.push_pcm(silence)
-                        await asyncio.sleep(0.02)
-                asyncio.ensure_future(_silence())
-
                 self._ws_call({
                     "request": True, "id": 0, "method": "produce",
                     "data": {
@@ -291,6 +380,25 @@ class VoiceClient:
                         "transportId": transport_id,
                     },
                 })
+                for pid in self._existing_producers:
+                    try:
+                        self._ws_call({
+                            "request": True, "id": 0, "method": "consume",
+                            "data": {
+                                "transportId": transport_id,
+                                "producerId": pid,
+                                "kind": "audio",
+                                "rtpCapabilities": {"codecs": [{
+                                    "channels": 2, "clockRate": 48000,
+                                    "mimeType": "audio/opus",
+                                    "parameters": {"sprop-stereo": 1},
+                                    "payloadType": 100,
+                                }]},
+                            },
+                        })
+                        print(f"[Voice] consume existing {pid} ok", flush=True)
+                    except Exception as e:
+                        print(f"[Voice] consume existing {pid} failed: {e}", flush=True)
                 setup_ok.set()
 
                 while self._running:
@@ -419,6 +527,9 @@ class VoiceClient:
 
     def stop(self):
         self._running = False
+        if self._reader:
+            self._reader.stop()
+            self._reader = None
         if self._ffmpeg_proc:
             self._ffmpeg_proc.terminate()
             try:
@@ -429,13 +540,15 @@ class VoiceClient:
         if self._track:
             async def _s():
                 self._track.stop()
-            asyncio.run_coroutine_threadsafe(_s(), self._loop)
+            if self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(_s(), self._loop)
         if self._pc:
             async def _c():
                 await self._pc.close()
             try:
-                future = asyncio.run_coroutine_threadsafe(_c(), self._loop)
-                future.result(timeout=5)
+                if self._loop and self._loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(_c(), self._loop)
+                    future.result(timeout=5)
             except Exception:
                 pass
             self._pc = None
