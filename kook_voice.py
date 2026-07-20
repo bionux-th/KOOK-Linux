@@ -10,7 +10,8 @@ from typing import Optional
 
 import websocket
 from av import AudioFrame
-from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription, RTCConfiguration
+from aiortc.rtcconfiguration import RTCIceServer
 
 from kook_api import KookAPI
 
@@ -281,9 +282,10 @@ class VoiceClient:
 
         def _run():
             async def _setup():
-                pc = RTCPeerConnection(
-                    iceServers=[{"urls": "stun:stun.l.google.com:19302"}]
+                config = RTCConfiguration(
+                    iceServers=[RTCIceServer(urls="stun:stun.l.google.com:19302")]
                 )
+                pc = RTCPeerConnection(config)
                 self._pc = pc
                 conn_async = asyncio.Event()
 
