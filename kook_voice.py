@@ -281,7 +281,9 @@ class VoiceClient:
 
         def _run():
             async def _setup():
-                pc = RTCPeerConnection()
+                pc = RTCPeerConnection(
+                    iceServers=[{"urls": "stun:stun.l.google.com:19302"}]
+                )
                 self._pc = pc
                 conn_async = asyncio.Event()
 
@@ -423,14 +425,18 @@ class VoiceClient:
                 error_msg.append(msg)
                 error_ev.set()
             finally:
-                for t in asyncio.all_tasks(loop):
-                    t.cancel()
                 if self._pc is not None:
                     try:
                         loop.run_until_complete(self._pc.close())
                     except Exception:
                         pass
                     self._pc = None
+                for t in asyncio.all_tasks(loop):
+                    t.cancel()
+                    try:
+                        loop.run_until_complete(t)
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.close()
 
