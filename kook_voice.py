@@ -338,6 +338,8 @@ class VoiceClient:
                 local_sdp = pc.localDescription.sdp
                 local_ice_ufrag = local_ice_pwd = None
                 local_fp_algo = local_fp_val = None
+                local_ssrc = None
+                local_pt = None
                 for line in local_sdp.split("\r\n"):
                     if line.startswith("a=ice-ufrag:"):
                         local_ice_ufrag = line[12:]
@@ -346,6 +348,14 @@ class VoiceClient:
                     elif line.startswith("a=fingerprint:sha-256"):
                         local_fp_algo = "sha-256"
                         local_fp_val = line[18:]
+                    elif line.startswith("a=ssrc:"):
+                        ss = line[7:].split(None, 1)[0]
+                        if ss.isdigit():
+                            local_ssrc = int(ss)
+                    elif line.startswith("a=rtpmap:") and "opus" in line:
+                        pt_str = line[9:].split(None, 1)[0]
+                        if pt_str.isdigit():
+                            local_pt = int(pt_str)
                 if not all([local_ice_ufrag, local_ice_pwd, local_fp_val]):
                     raise RuntimeError("Missing local ICE/DTLS params in SDP")
 
@@ -375,6 +385,8 @@ class VoiceClient:
                     raise RuntimeError(f"DTLS {pc.connectionState}")
                 connected_ev.set()
 
+                pt = local_pt or 100
+                ssrc = local_ssrc or 1357
                 self._ws_call({
                     "request": True, "id": 0, "method": "produce",
                     "data": {
@@ -384,9 +396,9 @@ class VoiceClient:
                                 "channels": 2, "clockRate": 48000,
                                 "mimeType": "audio/opus",
                                 "parameters": {"sprop-stereo": 1},
-                                "payloadType": 100,
+                                "payloadType": pt,
                             }],
-                            "encodings": [{"ssrc": 1357}],
+                            "encodings": [{"ssrc": ssrc}],
                         },
                         "transportId": transport_id,
                     },
